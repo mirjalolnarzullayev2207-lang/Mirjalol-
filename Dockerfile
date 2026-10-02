@@ -1,4 +1,5 @@
 FROM python:3.10-slim
 WORKDIR /app
 COPY . /app
-CMD ["python", "main.py"]
+EXPOSE 10000
+CMD python -m http.server 10000 & python main.py
