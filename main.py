@@ -42,5 +42,6 @@ def main():
                     approve_user(chat_id, user_id)
         time.sleep(1)
 
-if name == "main":
+if __name__ == "__main__":
     main()
+
