@@ -7,7 +7,10 @@ import signal
 import aiohttp
 from aiohttp import web
 
-BOT_TOKEN = os.environ["8785235717:AAEXu9JRb1NRd8Azz5PhC_DHQLWwSHyzDiE"]  # Tokenni kodga emas, muhit o'zgaruvchisiga yozing
+BOT_TOKEN = os.environ.get("8785235717:AAEXu9JRb1NRd8Azz5PhC_DHQLWwSHyzDiE")
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN muhit o'zgaruvchisi topilmadi (Render > Environment).")
+
 PORT = int(os.environ.get("PORT", 10000))
 MAX_CONCURRENCY = 30
 
@@ -35,7 +38,7 @@ class TelegramBot:
         self.tasks: set[asyncio.Task] = set()
 
     async def call(self, method: str, http_timeout: int = 10, **params):
-        """Telegram API so'rovi: 429 (flood) va tarmoq xatolarida qayta urinadi."""
+        """Telegram API so'rovi. 429 va tarmoq xatolarida 3 martagacha qayta urinadi."""
         for attempt in range(1, 4):
             try:
                 async with self.session.post(
@@ -51,7 +54,7 @@ class TelegramBot:
 
                 if status == 429:
                     wait = data.get("parameters", {}).get("retry_after", 1)
-                    log.warning("Flood limit, %s soniya kutiladi", wait)
+                    log.warning("Flood limit: %s soniya kutiladi", wait)
                     await asyncio.sleep(wait + 0.5)
                     continue
 
@@ -72,7 +75,7 @@ class TelegramBot:
     async def on_join_request(self, req: dict):
         chat_id = req["chat"]["id"]
         user = req["from"]
-        # user_chat_id orqali foydalanuvchi /start bosmagan bo'lsa ham xabar yuborish mumkin
+        # user_chat_id: foydalanuvchi /start bosmagan bo'lsa ham xabar yuborish imkonini beradi
         user_chat_id = req.get("user_chat_id", user["id"])
 
         async with self.sem:
@@ -83,6 +86,7 @@ class TelegramBot:
                 log.error("Tasdiqlanmadi: user=%s chat=%s", user["id"], chat_id)
                 return
             log.info("Tasdiqlandi: user=%s chat=%s", user["id"], chat_id)
+
             await self.call(
                 "sendMessage",
                 chat_id=user_chat_id,
@@ -91,8 +95,7 @@ class TelegramBot:
             )
 
     async def on_message(self, msg: dict):
-        text = msg.get("text", "")
-        if not text.startswith("/start"):
+        if not msg.get("text", "").startswith("/start"):
             return
         name = html.escape(msg["from"].get("first_name", "Do'stim"))
         async with self.sem:
@@ -112,6 +115,9 @@ class TelegramBot:
     # ---------- Polling ----------
 
     async def poll(self):
+        # Agar ilgari webhook o'rnatilgan bo'lsa, getUpdates ishlamaydi (409)
+        await self.call("deleteWebhook", drop_pending_updates=False)
+
         offset = 0
         log.info("Polling boshlandi")
         while True:
@@ -138,7 +144,7 @@ async def health(_request):
 async def main():
     bot = TelegramBot(BOT_TOKEN)
 
-    # Health-check server (Render uchun port)
+    # Health-check server (Render port talabi uchun)
     app = web.Application()
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
@@ -169,3 +175,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
