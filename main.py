@@ -1,4 +1,4 @@
-import time
+
 import json
 import urllib.request
 import urllib.parse
@@ -40,7 +40,7 @@ def main():
                     chat_id = req["chat"]["id"]
                     user_id = req["from"]["id"]
                     approve_user(chat_id, user_id)
-        time.sleep(1)
+        
 
 if __name__ == "__main__":
     main()
