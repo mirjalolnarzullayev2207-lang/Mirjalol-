@@ -7,7 +7,7 @@ import signal
 import aiohttp
 from aiohttp import web
 
-BOT_TOKEN = os.environ.get("8785235717:AAEXu9JRb1NRd8Azz5PhC_DHQLWwSHyzDiE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN muhit o'zgaruvchisi topilmadi (Render > Environment).")
 
