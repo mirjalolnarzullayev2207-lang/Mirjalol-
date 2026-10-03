@@ -1,47 +1,171 @@
+import asyncio
+import html
+import logging
+import os
+import signal
 
-import json
-import urllib.request
-import urllib.parse
+import aiohttp
+from aiohttp import web
 
-BOT_TOKEN = "8785235717:AAEXu9JRb1NRd8Azz5PhC_DHQLWwSHyzDiE"
-URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
+BOT_TOKEN = os.environ["8785235717:AAEXu9JRb1NRd8Azz5PhC_DHQLWwSHyzDiE"]  # Tokenni kodga emas, muhit o'zgaruvchisiga yozing
+PORT = int(os.environ.get("PORT", 10000))
+MAX_CONCURRENCY = 30
 
-def send_request(method, params=None):
-    if params:
-        data = urllib.parse.urlencode(params).encode('utf-8')
-        req = urllib.request.Request(URL + method, data=data)
-    else:
-        req = urllib.request.Request(URL + method)
-    try:
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except Exception as e:
-        print(f"Xatolik: {e}")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+log = logging.getLogger("join-bot")
+
+WELCOME_TEXT = (
+    "<b>Assalomu alaykum! Kanalga qo'shilish so'rovingiz tasdiqlandi! 🎉</b>\n\n"
+    "Kanalimizga xush kelibsiz!"
+)
+START_TEXT = (
+    "Salom, <b>{name}</b>! 👋\n\n"
+    "Men kanallarga a'zo bo'lish so'rovlarini avtomatik tasdiqlovchi botman."
+)
+
+
+class TelegramBot:
+    def __init__(self, token: str):
+        self.base = f"https://api.telegram.org/bot{token}/"
+        self.session: aiohttp.ClientSession | None = None
+        self.sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        self.tasks: set[asyncio.Task] = set()
+
+    async def call(self, method: str, http_timeout: int = 10, **params):
+        """Telegram API so'rovi: 429 (flood) va tarmoq xatolarida qayta urinadi."""
+        for attempt in range(1, 4):
+            try:
+                async with self.session.post(
+                    self.base + method,
+                    json=params,
+                    timeout=aiohttp.ClientTimeout(total=http_timeout),
+                ) as resp:
+                    data = await resp.json()
+                    status = resp.status
+
+                if data.get("ok"):
+                    return data["result"]
+
+                if status == 429:
+                    wait = data.get("parameters", {}).get("retry_after", 1)
+                    log.warning("Flood limit, %s soniya kutiladi", wait)
+                    await asyncio.sleep(wait + 0.5)
+                    continue
+
+                log.warning("%s xato: %s", method, data.get("description"))
+                return None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.warning("%s tarmoq xatosi (urinish %d): %s", method, attempt, e)
+                await asyncio.sleep(attempt)
         return None
 
-def approve_user(chat_id, user_id):
-    res = send_request("approveChatJoinRequest", {
-        "chat_id": chat_id,
-        "user_id": user_id
-    })
-    if res and res.get("ok"):
-        print(f"Tasdiqlandi! Chat ID: {chat_id}, User ID: {user_id}")
+    def spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
-def main():
-    print("Bot muvaffaqiyatli ishga tushdi va kutilmoqda...")
-    offset = 0
-    while True:
-        updates = send_request("getUpdates", {"offset": offset, "timeout": 30})
-        if updates and updates.get("ok"):
-            for update in updates.get("result", []):
+    # ---------- Handlerlar ----------
+
+    async def on_join_request(self, req: dict):
+        chat_id = req["chat"]["id"]
+        user = req["from"]
+        # user_chat_id orqali foydalanuvchi /start bosmagan bo'lsa ham xabar yuborish mumkin
+        user_chat_id = req.get("user_chat_id", user["id"])
+
+        async with self.sem:
+            approved = await self.call(
+                "approveChatJoinRequest", chat_id=chat_id, user_id=user["id"]
+            )
+            if approved is None:
+                log.error("Tasdiqlanmadi: user=%s chat=%s", user["id"], chat_id)
+                return
+            log.info("Tasdiqlandi: user=%s chat=%s", user["id"], chat_id)
+            await self.call(
+                "sendMessage",
+                chat_id=user_chat_id,
+                text=WELCOME_TEXT,
+                parse_mode="HTML",
+            )
+
+    async def on_message(self, msg: dict):
+        text = msg.get("text", "")
+        if not text.startswith("/start"):
+            return
+        name = html.escape(msg["from"].get("first_name", "Do'stim"))
+        async with self.sem:
+            await self.call(
+                "sendMessage",
+                chat_id=msg["chat"]["id"],
+                text=START_TEXT.format(name=name),
+                parse_mode="HTML",
+            )
+
+    def dispatch(self, update: dict):
+        if "chat_join_request" in update:
+            self.spawn(self.on_join_request(update["chat_join_request"]))
+        elif "message" in update:
+            self.spawn(self.on_message(update["message"]))
+
+    # ---------- Polling ----------
+
+    async def poll(self):
+        offset = 0
+        log.info("Polling boshlandi")
+        while True:
+            updates = await self.call(
+                "getUpdates",
+                http_timeout=35,
+                offset=offset,
+                timeout=25,  # Telegram long polling (soniya)
+                allowed_updates=["message", "chat_join_request"],
+            )
+            if updates is None:
+                await asyncio.sleep(2)
+                continue
+
+            for update in updates:
                 offset = update["update_id"] + 1
-                if "chat_join_request" in update:
-                    req = update["chat_join_request"]
-                    chat_id = req["chat"]["id"]
-                    user_id = req["from"]["id"]
-                    approve_user(chat_id, user_id)
-        
+                self.dispatch(update)
+
+
+async def health(_request):
+    return web.Response(text="OK")
+
+
+async def main():
+    bot = TelegramBot(BOT_TOKEN)
+
+    # Health-check server (Render uchun port)
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    log.info("Health server %s portda ishga tushdi", PORT)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # Windows
+            pass
+
+    async with aiohttp.ClientSession() as session:
+        bot.session = session
+        poll_task = asyncio.create_task(bot.poll())
+        await stop.wait()
+
+        log.info("To'xtatilmoqda...")
+        poll_task.cancel()
+        if bot.tasks:
+            await asyncio.gather(*bot.tasks, return_exceptions=True)
+
+    await runner.cleanup()
+
 
 if __name__ == "__main__":
-    main()
-
+    asyncio.run(main())
