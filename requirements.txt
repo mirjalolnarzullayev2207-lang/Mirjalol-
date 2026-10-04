@@ -1,1 +1,2 @@
 aiohttp>=3.9
+asyncpg>=0.29
