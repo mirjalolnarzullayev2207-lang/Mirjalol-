@@ -1,0 +1,49 @@
+from urllib.parse import urlparse
+
+SOCIAL_HOSTS = {
+    "instagram": {
+        "instagram.com",
+        "www.instagram.com",
+        "m.instagram.com",
+    },
+    "youtube": {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtu.be",
+        "www.youtu.be",
+    },
+    "x": {
+        "x.com",
+        "www.x.com",
+        "twitter.com",
+        "www.twitter.com",
+        "mobile.twitter.com",
+    },
+}
+
+
+def classify_social_url(url: str) -> str | None:
+    try:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+
+    for platform, hosts in SOCIAL_HOSTS.items():
+        if host in hosts:
+            return platform
+
+    return None
+
+
+def is_https_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme.lower() == "https"
+            and bool(parsed.hostname)
+            and not parsed.username
+            and not parsed.password
+        )
+    except ValueError:
+        return False
